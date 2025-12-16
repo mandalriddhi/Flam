@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Bézier Curve with Physics</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #0a0a0a;
+            font-family: 'Monaco', 'Courier New', monospace;
+            color: #0f0;
+            overflow: hidden;
+        }
+        #canvas {
+            display: block;
+            background: #000;
+            border: 2px solid #0f0;
+            cursor: crosshair;
+        }
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #0f0;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #0f0;
+        }
+        button {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 8px 15px;
+            margin: 5px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        button:hover {
+            background: #0f0;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div class="info">
+        <div>FPS: <span id="fps">60</span></div>
+        <div>Mouse: (<span id="mouseX">0</span>, <span id="mouseY">0</span>)</div>
+        <div>P1: (<span id="p1x">0</span>, <span id="p1y">0</span>)</div>
+        <div>P2: (<span id="p2x">0</span>, <span id="p2y">0</span>)</div>
+        <div style="margin-top: 10px;">Move mouse to control the curve</div>
+    </div>
+    
+    <div class="controls">
+        <button id="toggleTangents">Toggle Tangents</button>
+        <button id="togglePoints">Toggle Points</button>
+        <button id="reset">Reset</button>
+    </div>
+    
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // ============================================
+        // VECTOR MATH UTILITIES
+        // ============================================
+        class Vec2 {
+            constructor(x = 0, y = 0) {
+                this.x = x;
+                this.y = y;
+            }
+            
+            add(v) {
+                return new Vec2(this.x + v.x, this.y + v.y);
+            }
+            
+            sub(v) {
+                return new Vec2(this.x - v.x, this.y - v.y);
+            }
+            
+            scale(s) {
+                return new Vec2(this.x * s, this.y * s);
+            }
+            
+            length() {
+                return Math.sqrt(this.x * this.x + this.y * this.y);
+            }
+            
+            normalize() {
+                const len = this.length();
+                if (len === 0) return new Vec2(0, 0);
+                return new Vec2(this.x / len, this.y / len);
+            }
+        }
+
+        // ============================================
+        // BÉZIER CURVE MATHEMATICS
+        // ============================================
+        class BezierCurve {
+            constructor(p0, p1, p2, p3) {
+                this.p0 = p0; // Fixed start
+                this.p1 = p1; // Dynamic control point 1
+                this.p2 = p2; // Dynamic control point 2
+                this.p3 = p3; // Fixed end
+            }
+            
+            // Cubic Bézier: B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
+            point(t) {
+                const t1 = 1 - t;
+                const t1_2 = t1 * t1;
+                const t1_3 = t1_2 * t1;
+                const t_2 = t * t;
+                const t_3 = t_2 * t;
+                
+                const x = t1_3 * this.p0.x +
+                         3 * t1_2 * t * this.p1.x +
+                         3 * t1 * t_2 * this.p2.x +
+                         t_3 * this.p3.x;
+                         
+                const y = t1_3 * this.p0.y +
+                         3 * t1_2 * t * this.p1.y +
+                         3 * t1 * t_2 * this.p2.y +
+                         t_3 * this.p3.y;
+                         
+                return new Vec2(x, y);
+            }
+            
+            // Derivative: B'(t) = 3(1-t)²(P₁-P₀) + 6(1-t)t(P₂-P₁) + 3t²(P₃-P₂)
+            tangent(t) {
+                const t1 = 1 - t;
+                const t1_2 = t1 * t1;
+                const t_2 = t * t;
+                
+                const dx = 3 * t1_2 * (this.p1.x - this.p0.x) +
+                          6 * t1 * t * (this.p2.x - this.p1.x) +
+                          3 * t_2 * (this.p3.x - this.p2.x);
+                          
+                const dy = 3 * t1_2 * (this.p1.y - this.p0.y) +
+                          6 * t1 * t * (this.p2.y - this.p1.y) +
+                          3 * t_2 * (this.p3.y - this.p2.y);
+                          
+                return new Vec2(dx, dy);
+            }
+            
+            // Sample curve at intervals for rendering
+            sample(step = 0.01) {
+                const points = [];
+                for (let t = 0; t <= 1; t += step) {
+                    points.push(this.point(t));
+                }
+                points.push(this.point(1)); // Ensure endpoint
+                return points;
+            }
+            
+            // Get tangent vectors at intervals
+            sampleTangents(count = 10) {
+                const tangents = [];
+                for (let i = 0; i <= count; i++) {
+                    const t = i / count;
+                    const p = this.point(t);
+                    const tan = this.tangent(t).normalize();
+                    tangents.push({ point: p, tangent: tan });
+                }
+                return tangents;
+            }
+        }
+
+        // ============================================
+        // SPRING PHYSICS SYSTEM
+        // ============================================
+        class PhysicsPoint {
+            constructor(x, y, k = 0.08, damping = 0.85) {
+                this.pos = new Vec2(x, y);
+                this.vel = new Vec2(0, 0);
+                this.target = new Vec2(x, y);
+                this.k = k;           // Spring constant
+                this.damping = damping; // Damping factor
+            }
+            
+            // Spring-damper model: a = -k(pos - target) - damping * vel
+            update() {
+                const displacement = this.pos.sub(this.target);
+                const acc = displacement.scale(-this.k).sub(this.vel.scale(this.damping));
+                
+                this.vel = this.vel.add(acc);
+                this.pos = this.pos.add(this.vel);
+            }
+            
+            setTarget(x, y) {
+                this.target = new Vec2(x, y);
+            }
+        }
+
+        // ============================================
+        // MAIN APPLICATION
+        // ============================================
+        class BezierApp {
+            constructor() {
+                this.canvas = document.getElementById('canvas');
+                this.ctx = this.canvas.getContext('2d');
+                
+                // Setup canvas
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+                
+                // Initialize control points
+                const cx = this.canvas.width / 2;
+                const cy = this.canvas.height / 2;
+                
+                this.p0 = new Vec2(100, cy);
+                this.p3 = new Vec2(this.canvas.width - 100, cy);
+                
+                this.p1Physics = new PhysicsPoint(cx - 100, cy - 100);
+                this.p2Physics = new PhysicsPoint(cx + 100, cy + 100);
+                
+                // Mouse state
+                this.mouse = new Vec2(cx, cy);
+                this.mouseInfluence = 150;
+                
+                // Rendering options
+                this.showTangents = true;
+                this.showPoints = true;
+                
+                // FPS tracking
+                this.fps = 60;
+                this.frameCount = 0;
+                this.lastFpsUpdate = Date.now();
+                
+                // Setup event listeners
+                this.setupEvents();
+                
+                // Start animation loop
+                this.animate();
+            }
+            
+            resize() {
+                this.canvas.width = window.innerWidth - 40;
+                this.canvas.height = window.innerHeight - 40;
+            }
+            
+            setupEvents() {
+                this.canvas.addEventListener('mousemove', (e) => {
+                    const rect = this.canvas.getBoundingClientRect();
+                    this.mouse.x = e.clientX - rect.left;
+                    this.mouse.y = e.clientY - rect.top;
+                });
+                
+                document.getElementById('toggleTangents').addEventListener('click', () => {
+                    this.showTangents = !this.showTangents;
+                });
+                
+                document.getElementById('togglePoints').addEventListener('click', () => {
+                    this.showPoints = !this.showPoints;
+                });
+                
+                document.getElementById('reset').addEventListener('click', () => {
+                    const cx = this.canvas.width / 2;
+                    const cy = this.canvas.height / 2;
+                    this.p1Physics.pos = new Vec2(cx - 100, cy - 100);
+                    this.p1Physics.vel = new Vec2(0, 0);
+                    this.p2Physics.pos = new Vec2(cx + 100, cy + 100);
+                    this.p2Physics.vel = new Vec2(0, 0);
+                });
+            }
+            
+            updatePhysics() {
+                // Calculate targets based on mouse position
+                const cx = this.canvas.width / 2;
+                const cy = this.canvas.height / 2;
+                
+                // P1 moves opposite to mouse (left side)
+                const offset1X = (this.mouse.x - cx) * -0.3;
+                const offset1Y = (this.mouse.y - cy) * 0.5;
+                this.p1Physics.setTarget(cx - 100 + offset1X, cy - 100 + offset1Y);
+                
+                // P2 follows mouse (right side)
+                const offset2X = (this.mouse.x - cx) * 0.3;
+                const offset2Y = (this.mouse.y - cy) * 0.5;
+                this.p2Physics.setTarget(cx + 100 + offset2X, cy + 100 + offset2Y);
+                
+                // Update physics
+                this.p1Physics.update();
+                this.p2Physics.update();
+            }
+            
+            render() {
+                const ctx = this.ctx;
+                
+                // Clear canvas
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                // Create Bézier curve with current positions
+                const curve = new BezierCurve(
+                    this.p0,
+                    this.p1Physics.pos,
+                    this.p2Physics.pos,
+                    this.p3
+                );
+                
+                // Draw curve
+                ctx.strokeStyle = '#0ff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                const points = curve.sample(0.01);
+                ctx.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i].x, points[i].y);
+                }
+                ctx.stroke();
+                
+                // Draw tangent vectors
+                if (this.showTangents) {
+                    const tangents = curve.sampleTangents(15);
+                    ctx.strokeStyle = '#f0f';
+                    ctx.lineWidth = 1;
+                    
+                    for (const { point, tangent } of tangents) {
+                        const len = 25;
+                        const end = point.add(tangent.scale(len));
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(point.x, point.y);
+                        ctx.lineTo(end.x, end.y);
+                        ctx.stroke();
+                        
+                        // Arrow head
+                        const angle = Math.atan2(tangent.y, tangent.x);
+                        const arrowLen = 8;
+                        ctx.beginPath();
+                        ctx.moveTo(end.x, end.y);
+                        ctx.lineTo(
+                            end.x - arrowLen * Math.cos(angle - Math.PI / 6),
+                            end.y - arrowLen * Math.sin(angle - Math.PI / 6)
+                        );
+                        ctx.moveTo(end.x, end.y);
+                        ctx.lineTo(
+                            end.x - arrowLen * Math.cos(angle + Math.PI / 6),
+                            end.y - arrowLen * Math.sin(angle + Math.PI / 6)
+                        );
+                        ctx.stroke();
+                    }
+                }
+                
+                // Draw control points and lines
+                if (this.showPoints) {
+                    // Control lines
+                    ctx.strokeStyle = '#0f0';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    ctx.moveTo(this.p0.x, this.p0.y);
+                    ctx.lineTo(this.p1Physics.pos.x, this.p1Physics.pos.y);
+                    ctx.lineTo(this.p2Physics.pos.x, this.p2Physics.pos.y);
+                    ctx.lineTo(this.p3.x, this.p3.y);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    
+                    // Control points
+                    const drawPoint = (p, color, label) => {
+                        ctx.fillStyle = color;
+                        ctx.beginPath();
+                        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                        
+                        ctx.fillStyle = '#0f0';
+                        ctx.font = '12px Monaco';
+                        ctx.fillText(label, p.x + 10, p.y - 10);
+                    };
+                    
+                    drawPoint(this.p0, '#f00', 'P0 (fixed)');
+                    drawPoint(this.p1Physics.pos, '#ff0', 'P1 (dynamic)');
+                    drawPoint(this.p2Physics.pos, '#ff0', 'P2 (dynamic)');
+                    drawPoint(this.p3, '#f00', 'P3 (fixed)');
+                }
+                
+                // Update UI
+                document.getElementById('mouseX').textContent = Math.round(this.mouse.x);
+                document.getElementById('mouseY').textContent = Math.round(this.mouse.y);
+                document.getElementById('p1x').textContent = Math.round(this.p1Physics.pos.x);
+                document.getElementById('p1y').textContent = Math.round(this.p1Physics.pos.y);
+                document.getElementById('p2x').textContent = Math.round(this.p2Physics.pos.x);
+                document.getElementById('p2y').textContent = Math.round(this.p2Physics.pos.y);
+            }
+            
+            updateFPS() {
+                this.frameCount++;
+                const now = Date.now();
+                const elapsed = now - this.lastFpsUpdate;
+                
+                if (elapsed >= 1000) {
+                    this.fps = Math.round(this.frameCount * 1000 / elapsed);
+                    document.getElementById('fps').textContent = this.fps;
+                    this.frameCount = 0;
+                    this.lastFpsUpdate = now;
+                }
+            }
+            
+            animate() {
+                this.updatePhysics();
+                this.render();
+                this.updateFPS();
+                requestAnimationFrame(() => this.animate());
+            }
+        }
+
+        // Start the application
+        new BezierApp();
+    </script>
+</body>
+</html>
